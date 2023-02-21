@@ -1,0 +1,39 @@
+variables:
+  KUN_NAMESPACE: prj-us3-us3cli
+
+stages:
+  - Test
+  - PreDeploy
+  - ProductionDeploy
+
+before_script:
+  - wget -O us3cli http://us3-release.cn-bj.ufileos.com/us3cli/us3cli-linux64
+  - chmod +x us3cli
+  - ./us3cli config default --accesskey $US3_BUCKET_TOKEN_PUBLIC_KEY --secretkey $US3_BUCKET_TOKEN_PRIVATE_KEY --endpoint $US3_BUCKET_ENDPOINT
+  - ./us3cli config --su default
+
+unit-test:
+  stage: Test
+  tags:
+    - uaek-c1
+  image: maven:3.8.4-openjdk-8
+  script: 
+       - mvn test -f "pom.xml"
+  only:
+    - /^fix-.*$/
+    - /^feat-.*$/
+    - /^hotfix-.*$/
+    - dev_qiao
+
+deploy:
+    stage: ProductionDeploy
+    tags:
+        - uaek-c1
+    image: maven:3.8.4-openjdk-8
+    script: 
+      - ./release.sh
+      - SemVer=`git describe --tags | sed 's/^v//g' | awk -F"-" '{printf $1}'`
+      - ./us3cli cp -r ./target us3://us3-release/us3-bigdata/adaptor/$SemVer/ --include "*.jar" --exclude "original*"
+      - ./us3cli cp -r ./target us3://us3-release/us3-bigdata/adaptor/ --include "*.jar" --exclude "original*"
+    only:
+      - tags

@@ -1,0 +1,7 @@
+target
+.idea
+.DS_Store
+dependency-reduced-pom.xml
+us3-bigdata-adaptor.iml
+.vscode
+/lib
