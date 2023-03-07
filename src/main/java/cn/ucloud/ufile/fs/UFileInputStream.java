@@ -123,14 +123,7 @@ public class UFileInputStream extends FSInputStream {
         readPos++;
         skipPos++;
         ireadSum += 1;
-        try {
-            return inputStream.read();
-        } catch (IOException e){
-            UFileUtils.Error(cfg.getLogLevel(), String.format("[UFileInputStream.read] failed at readPos:%d," +
-                    " reopen stream and retry", readPos));
-            reopen(skipPos);
-            return inputStream.read();
-        }
+        return inputStream.read();
     }
 
     @Override
@@ -145,14 +138,7 @@ public class UFileInputStream extends FSInputStream {
         int count;
         while (!isOver && (readSum < len)) {
             /** 如果没有显示标志结束，而且buf没有读满*/
-            try {
-                count = inputStream.read(buf, off, len - readSum);
-            } catch (IOException e){
-                UFileUtils.Error(cfg.getLogLevel(), String.format("[UFileInputStream.read] failed at readPos:%d, offset:%d length:%d," +
-                        " reopen stream and retry", readPos, off, len));
-                reopen(skipPos + off);
-                count = inputStream.read(buf, off, len - readSum);
-            }
+            count = inputStream.read(buf, off, len - readSum);
             switch (count) {
                 case -1:
                     if (readSum == 0) {
