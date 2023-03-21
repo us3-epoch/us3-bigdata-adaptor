@@ -152,12 +152,6 @@ public class UFileInputStream extends FSInputStream {
         while (!isOver && (readSum < len)) {
             /** 如果没有显示标志结束，而且buf没有读满*/
             try {
-                Random rand =new Random(25);
-                int i;
-                i=rand.nextInt(100);
-                if (i > 50){
-                    throw new IOException();
-                }
                 count = inputStream.read(buf, off, len - readSum);
             } catch (IOException e){
                 UFileUtils.Error(cfg.getLogLevel(), String.format("[UFileInputStream.read] failed at readPos:%d, offset:%d length:%d, error: %s" +
