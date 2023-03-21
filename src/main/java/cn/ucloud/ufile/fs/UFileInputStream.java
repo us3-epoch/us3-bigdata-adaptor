@@ -13,6 +13,7 @@ import org.apache.hadoop.fs.FSInputStream;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Random;
 
 public class UFileInputStream extends FSInputStream {
     /**
@@ -120,16 +121,21 @@ public class UFileInputStream extends FSInputStream {
     @Override
     public synchronized int read() throws IOException {
         iseek();
-        readPos++;
-        skipPos++;
-        ireadSum += 1;
         try {
-            return inputStream.read();
+            int n = inputStream.read();
+            readPos++;
+            skipPos++;
+            ireadSum += 1;
+            return n;
         } catch (IOException e){
             UFileUtils.Error(cfg.getLogLevel(), String.format("[UFileInputStream.read] failed at readPos:%d," +
                     " reopen stream and retry", readPos));
             reopen(skipPos);
-            return inputStream.read();
+            int n = inputStream.read();
+            readPos++;
+            skipPos++;
+            ireadSum += 1;
+            return n;
         }
     }
 
@@ -146,11 +152,17 @@ public class UFileInputStream extends FSInputStream {
         while (!isOver && (readSum < len)) {
             /** 如果没有显示标志结束，而且buf没有读满*/
             try {
+                Random rand =new Random(25);
+                int i;
+                i=rand.nextInt(100);
+                if (i > 50){
+                    throw new IOException();
+                }
                 count = inputStream.read(buf, off, len - readSum);
             } catch (IOException e){
-                UFileUtils.Error(cfg.getLogLevel(), String.format("[UFileInputStream.read] failed at readPos:%d, offset:%d length:%d," +
-                        " reopen stream and retry", readPos, off, len));
-                reopen(skipPos + off);
+                UFileUtils.Error(cfg.getLogLevel(), String.format("[UFileInputStream.read] failed at readPos:%d, offset:%d length:%d, error: %s" +
+                        " reopen stream and retry", readPos, off, len, e.getMessage()));
+                reopen(readPos);
                 count = inputStream.read(buf, off, len - readSum);
             }
             switch (count) {
@@ -167,12 +179,11 @@ public class UFileInputStream extends FSInputStream {
                 default:
                     off += count;
                     readSum += count;
+                    readPos += count;
+                    skipPos += count;
+                    ireadSum += count;
             }
         }
-
-        readPos += readSum;
-        skipPos += readSum;
-        ireadSum += readSum;
         return readSum;
     }
 
@@ -211,9 +222,22 @@ public class UFileInputStream extends FSInputStream {
             } catch (UfileSignatureException e) {
                 e.printStackTrace();
                 throw UFileUtils.TranslateException("[UFileInputStream.reopen] signature faild ", key, e);
-            } catch (UfileClientException | UfileServerException e) {
+            } catch (UfileClientException e) {
                 e.printStackTrace();
                 exception = e;
+            } catch (UfileServerException e){
+                if (e.getErrorBean().getResponseCode() == 416){
+                    inputStream = new InputStream() {
+                        @Override
+                        public int read() throws IOException {
+                            return -1;
+                        }
+                    };
+                    readPos = pos;
+                    skipPos = pos;
+                    closed = false;
+                    return;
+                }
             }
 
             try {
