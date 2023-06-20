@@ -19,3 +19,6 @@ US3Hadoop适配器是为了解决Hadoop访问UCloud对象存储US3的问题，�
   - hadoop-2.8.5
   - hadoop-3.1.1
 
+
+## 许可证
+[Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0.html)
