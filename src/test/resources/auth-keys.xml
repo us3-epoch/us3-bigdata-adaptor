@@ -1,0 +1,19 @@
+<configuration>
+    <property>
+        <name>test.fs.us3.name</name>
+        <value>us3://{$your_bucket}/</value>
+    </property>
+    <property>
+        <name>fs.us3.access.key</name>
+        <value>{$access_key}</value>
+    </property>
+    <property>
+        <name>fs.us3.secret.key</name>
+        <value>{$secret_key}</value>
+    </property>
+    <property>
+        <name>fs.us3.endpoint</name>
+        <value>{$us3_endpoint}</value>
+    </property>
+
+</configuration>
