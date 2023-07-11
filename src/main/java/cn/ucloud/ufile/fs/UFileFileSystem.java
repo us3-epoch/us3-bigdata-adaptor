@@ -519,47 +519,26 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
      * @throws IOException
      */
     private boolean ufileRename(String srcKey, String dstKey) throws IOException {
-        UFileUtils.Debug(cfg.getLogLevel(),"[ufileRename] srcKey:%s exist, dstKey:%s ", srcKey, dstKey);
-        int retryCount = 1;
-        while(true){
+        UFileUtils.Debug(cfg.getLogLevel(), "[ufileRename] srcKey:%s exist, dstKey:%s ", srcKey, dstKey);
+        OSMeta srcMeta = new OSMeta(bucket, srcKey);
+        OSMeta dstMeta = new OSMeta(bucket, dstKey);
+
         try {
-            UfileClient.object(objauth, objcfg)
-                    .renameObject(bucket, srcKey).isForcedToCover(true)
-                    .isRenamedTo(dstKey)
-                    .execute();
-            UFileFileStatus ufs = Constants.ufileMetaStore.getUFileFileStatus(cfg, srcKey);
-            if (ufs != null) {
-                /** 减少目的端重新HEAD操作 */
-                if (!ufs.is404Cache()) {
-                    Constants.ufileMetaStore.putUFileFileStatus(cfg, srcKey, UFileFileStatus.Cache404());
-                    UFileFileStatus dstUfs = new UFileFileStatus(new Path(rootPath, dstKey), ufs);
-                    Constants.ufileMetaStore.putUFileFileStatus(cfg, dstKey, dstUfs);
-                } else {
-                    // 源是404cache
-                    Constants.ufileMetaStore.removeUFileFileStatus(dstKey);
-                }
-            } else {
-                Constants.ufileMetaStore.putUFileFileStatus(cfg, srcKey, UFileFileStatus.Cache404());
-                Constants.ufileMetaStore.removeUFileFileStatus(dstKey);
-            }
+            innerCopyFile(srcMeta, dstMeta, null, null);
+            DeleteObjectApi request = UfileClient.object(objauth, objcfg).deleteObject(srcKey, bucket);
+            /*有可能发给mds，删除目录时会耗时长*/
+            request.setReadTimeOut(300*1000);
+            request.execute();
             return true;
         } catch (UfileClientException e) {
-            UFileUtils.Error(cfg.getLogLevel(),"[ufileRename] client, srcKey:%s exist, dstKey:%s, %s ", srcKey, dstKey, e.toString());
-            if(retryCount>=Constants.DEFAULT_MAX_TRYTIMES)
+            UFileUtils.Error(cfg.getLogLevel(), "[ufileRename] client, srcKey:%s exist, dstKey:%s, %s ",
+                    srcKey, dstKey, e.toString());
             throw UFileUtils.TranslateException(String.format("ufileRename to %s", dstKey), srcKey, e);
         } catch (UfileServerException e) {
-            UFileUtils.Error(cfg.getLogLevel(),"[ufileRename] server, srcKey:%s exist, dstKey:%s, %s ", srcKey, dstKey, e.toString());
-            if(retryCount>=Constants.DEFAULT_MAX_TRYTIMES||e.getErrorBean().getResponseCode()<500)
+            UFileUtils.Error(cfg.getLogLevel(), "[ufileRename] server, srcKey:%s exist, dstKey:%s, %s ",
+                    srcKey, dstKey, e.toString());
             throw UFileUtils.TranslateException(String.format("ufileRename to %s", dstKey), srcKey, e);
-        }finally{
-            retryCount ++;
-            try {
-                Thread.sleep(retryCount* Constants.TRY_DELAY_BASE_TIME);
-            } catch (InterruptedException e) {
-                throw new IOException("not able to handle exception", e);
-            }
         }
-    }
     }
 
     /**
