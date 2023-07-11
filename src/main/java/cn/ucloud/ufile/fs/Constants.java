@@ -11,7 +11,7 @@ public final class Constants {
 
     public static final String USER_AGENT = "us3-bigdata";
 
-    public static final String VERSION = "1.4.0";
+    public static final String VERSION = "1.4.2";
 
     /** 日期解析模板，解析如一下格式:
      *  "Sat, 07 Dec 2019 07:20:59 GMT"
