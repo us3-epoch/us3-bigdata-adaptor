@@ -1,5 +1,9 @@
 <configuration>
     <property>
+        <name>fs.contract.test.fs.us3</name>
+        <value>us3://{$your_bucket}/</value>
+    </property>
+    <property>
         <name>test.fs.us3.name</name>
         <value>us3://{$your_bucket}/</value>
     </property>
@@ -15,5 +19,4 @@
         <name>fs.us3.endpoint</name>
         <value>{$us3_endpoint}</value>
     </property>
-
 </configuration>
