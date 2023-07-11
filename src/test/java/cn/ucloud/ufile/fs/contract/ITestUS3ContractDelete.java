@@ -15,7 +15,6 @@
  *  See the License for the specific language governing permissions and
  *  limitations under the License.
  */
-
 package cn.ucloud.ufile.fs.contract;
 
 import org.apache.hadoop.conf.Configuration;
@@ -23,7 +22,7 @@ import org.apache.hadoop.fs.contract.AbstractContractDeleteTest;
 import org.apache.hadoop.fs.contract.AbstractFSContract;
 
 /**
- * S3A contract tests covering deletes.
+ * US3 contract tests covering deletes.
  */
 public class ITestUS3ContractDelete extends AbstractContractDeleteTest {
 
