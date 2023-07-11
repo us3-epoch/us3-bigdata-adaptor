@@ -4,8 +4,11 @@ import cn.ucloud.ufile.UfileClient;
 import cn.ucloud.ufile.api.object.DeleteObjectApi;
 import cn.ucloud.ufile.api.object.ObjectConfig;
 import cn.ucloud.ufile.api.object.ObjectListWithDirFormatApi;
+import cn.ucloud.ufile.api.object.multi.MultiUploadInfo;
+import cn.ucloud.ufile.api.object.multi.MultiUploadPartState;
 import cn.ucloud.ufile.auth.UfileObjectLocalAuthorization;
 import cn.ucloud.ufile.bean.CommonPrefix;
+import cn.ucloud.ufile.bean.MultiUploadResponse;
 import cn.ucloud.ufile.bean.ObjectContentBean;
 import cn.ucloud.ufile.bean.ObjectListWithDirFormatBean;
 import cn.ucloud.ufile.bean.ObjectProfile;
@@ -36,6 +39,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 
+import static cn.ucloud.ufile.UfileConstants.MULTIPART_SIZE;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IO_FILE_BUFFER_SIZE_KEY;
 
 
@@ -1356,43 +1360,70 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
                 dstOsMeta.getBucket(),
                 dstOsMeta.getKey(),
                 directive);
-        //Iterator<String> it = userMeta.keySet().iterator();
-        //while(it.hasNext() && cfg.getLogLevel().ordinal() <= LOGLEVEL.DEBUG.ordinal()) {
-        //    String key = it.next();
-        //    UFileUtils.Debug(cfg.getLogLevel(),"[innerCopyFile] userMeta key:%s val:%s  ",  key, userMeta.get(key));
-        //}
-        int retryCount = 1;
-        while(true){
         try {
-            UfileClient.object(objauth, objcfg)
-            .copyObject(srcOsMeta.getBucket(), srcOsMeta.getKey())
-            .copyTo(dstOsMeta.getBucket(), dstOsMeta.getKey())
-            .withMetadataDirective(directive)
-            .withMetaDatas(userMeta)
-            .execute();
-            return;
-        } catch (UfileClientException e) {
-            UFileUtils.Error(cfg.getLogLevel(),"[innerCopyFile] client, %s ", e.toString());
-            if(retryCount >= Constants.DEFAULT_MAX_TRYTIMES)
-            throw UFileUtils.TranslateException(String.format("[innerCopyFile] %s to %s", srcOsMeta.getKey(), dstOsMeta.getKey()), srcOsMeta.getKey(), e);
-        } catch (UfileServerException e) {
-            if (e.getErrorBean().getResponseCode() == Constants.API_NOT_FOUND_HTTP_STATUS) {
-                UFileUtils.Info(cfg.getLogLevel(),"[innerCopyFile] server, %s or %s is not found", srcOsMeta.getKey(), dstOsMeta.getKey());
-                return;
-            }
+            copyObject(srcOsMeta.getKey(), dstOsMeta.getKey());
+        } catch (UfileServerException|UfileClientException e) {
+            throw UFileUtils.TranslateException("copy object", srcOsMeta.getKey() + " -> " + dstOsMeta.getKey(),e);
+        }
+    }
 
-            UFileUtils.Error(cfg.getLogLevel(),"[innerCopyFile] server, %s ", e.toString());
-            if(retryCount>=Constants.DEFAULT_MAX_TRYTIMES||e.getErrorBean().getResponseCode()<500)
-            throw UFileUtils.TranslateException(String.format("[innerCopyFile] %s to %s", srcOsMeta.getKey(), dstOsMeta.getKey()), srcOsMeta.getKey(), e);
-        }finally{
-            retryCount ++;
+    private void copyObject(String srcKey, String dstKey) throws UfileServerException, UfileClientException {
+        UFileUtils.Debug(cfg.getLogLevel(),"[copyObject] srcKey:%s' dstKey:%s ", srcKey, dstKey);
+        ObjectProfile srcObjProfile = getObjectProfile(srcKey);
+        if (cfg.getMultiCopyPartThreshold() > srcObjProfile.getContentLength()) {
+            UfileClient.object(objauth, objcfg)
+                    .copyObject(bucket, srcKey)
+                    .copyTo(bucket, dstKey)
+                    .execute();
+        } else {
+            UFileUtils.Debug(cfg.getLogLevel(),"[copyObject] file size: %d", srcObjProfile.getContentLength());
+            // 使用分片接口进行拷贝
+            MultiUploadInfo uploadInfo = UfileClient.object(objauth, objcfg)
+                    // 这里的 uploadTarget是 dstObject
+                    .initMultiUpload(dstKey, srcObjProfile.getContentType(), srcObjProfile.getBucket())
+                    .withStorageType(srcObjProfile.getStorageType())
+                    .withMetaDatas(srcObjProfile.getMetadatas())
+                    .execute();
+            // 需要先转成double 否则会丢失精度
+            int chunkCount = (int) Math.ceil((double) srcObjProfile.getContentLength() / MULTIPART_SIZE);
+            // 优化：使用线程池进行同步上传
+            List<MultiUploadPartState> partStateList = new ArrayList<>();
             try {
-                Thread.sleep(retryCount* Constants.TRY_DELAY_BASE_TIME);
-            } catch (InterruptedException e) {
-                throw new IOException("not able to handle exception", e);
+                for (int i = 0; i < chunkCount; i++) {
+                    int start = i * MULTIPART_SIZE;
+                    int end = start + MULTIPART_SIZE - 1;
+                    if (end >= srcObjProfile.getContentLength()) {
+                        end = (int) srcObjProfile.getContentLength();
+                    }
+                    MultiUploadPartState partState = UfileClient.object(objauth, objcfg)
+                            .multiUploadCopyPart(uploadInfo, i, srcObjProfile.getBucket(), srcObjProfile.getKeyName(),
+                                    start, end)
+                            .execute();
+                    partStateList.add(partState);
+                    UFileUtils.Debug(cfg.getLogLevel(),"[copyObject] part state: %s, start: %d, end: %d", partState.toString(), start, end);
+                }
+                MultiUploadResponse res = UfileClient.object(objauth, objcfg)
+                        .finishMultiUpload(uploadInfo, partStateList)
+                        .execute();
+                if (res.getFileSize() < srcObjProfile.getContentLength()) {
+                    // 接口返回的fileSize 小于 之前查询到的源文件大小
+                    UFileUtils.Error(cfg.getLogLevel(),"[copyObject] dst file size: %d less than src file size: %d",
+                            res.getFileSize(), srcObjProfile.getContentLength());
+                }
+            } catch (UfileServerException | UfileClientException e) {
+                // copy过程失败后要进行abort
+                UfileClient.object(objauth, objcfg)
+                        .abortMultiUpload(uploadInfo)
+                        .execute();
+                throw e;
             }
         }
     }
+
+    protected ObjectProfile getObjectProfile(String key) throws UfileServerException, UfileClientException {
+        return UfileClient.object(objauth, objcfg)
+                .objectProfile(key, bucket)
+                .execute();
     }
 
     /**

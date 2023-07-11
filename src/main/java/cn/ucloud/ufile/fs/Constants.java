@@ -166,6 +166,9 @@ public final class Constants {
     /** 过期缓冲时间，单位毫秒，10分钟 */
     public static long UFILE_STORAGE_ARCHIVE_BUFFEER_TIME = 10 * 60;
 
+    /** 文件拷贝需要分片的临界值，单位为 Byte, 100MB */
+    public static final int DEFAULT_MULTIPART_COPY_THRESHOLD = 100 * (1 << 20);
+
     /**
      * 涉及缓存相关的信息
      */
@@ -250,6 +253,10 @@ public final class Constants {
     public static final String CS_UFILE_TIMEOUT = "fs.ufile.timeout";
 
     public static final String CS_US3_TIMEOUT = "fs.us3.timeout";
+
+    // 拷贝文件，触发分片拷贝文件大小临界值
+    public static final String MULTI_COPY_PART_THRESHOLD = "fs.us3.multiCopyPart.threshold";
+
 }
 
 

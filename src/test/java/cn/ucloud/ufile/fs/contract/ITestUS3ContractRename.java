@@ -84,4 +84,25 @@ public class ITestUS3ContractRename extends AbstractContractRenameTest {
     ContractTestUtils.verifyFileContents(fs, dstFilePath, srcDataset);
     ContractTestUtils.assertPathDoesNotExist(fs, "Renamed file", srcFilePath);
   }
+
+  @Test
+  public void testRenameBigFile() throws Throwable {
+    describe("Verify renaming a dir into an existing dir puts the files"
+            +" from the source dir into the existing dir"
+            +" and leaves existing files alone");
+    FileSystem fs = getFileSystem();
+    String sourceSubdir = "source";
+    Path srcDir = path(sourceSubdir);
+    Path srcFilePath = new Path(srcDir, "source.txt");
+    byte[] srcDataset = dataset(120 * (1 << 20), 'a', 'z');
+    writeDataset(fs, srcFilePath, srcDataset, srcDataset.length, 1024, true);
+    Path destDir = path("dest");
+    mkdirs(destDir);
+
+    Path destFilePath = new Path(destDir, "dest.txt");
+    boolean rename = fs.rename(srcFilePath, destFilePath);
+    assertTrue("rename" + srcFilePath + " to " + destFilePath + " failed.", rename);
+    ContractTestUtils.verifyFileContents(fs, destFilePath, srcDataset);
+    ContractTestUtils.assertPathDoesNotExist(fs, "source file still exist", srcFilePath);
+  }
 }

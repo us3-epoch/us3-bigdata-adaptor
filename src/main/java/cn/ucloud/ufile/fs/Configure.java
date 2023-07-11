@@ -74,6 +74,8 @@ public class Configure {
 
     private boolean generateMD5 = false;
 
+    private int multiCopyPartThreshold;
+
     public void Parse(Configuration cfg) throws IOException {
         PublicKey = cfg.get(Constants.CS_US3_ACCESS_KEY, "");
         if (PublicKey.isEmpty()) { PublicKey = cfg.get(Constants.CS_ACCESS_KEY); }
@@ -139,6 +141,8 @@ public class Configure {
         if(retryTimes < 0 ){
             retryTimes = Constants.DEFAULT_MAX_TRYTIMES;
         }
+
+        multiCopyPartThreshold = cfg.getInt(Constants.MULTI_COPY_PART_THRESHOLD, Constants.DEFAULT_MULTIPART_COPY_THRESHOLD) * (1 << 20);
     }
     public String getCustomZookeeperAddresses() {
         return customZookeeperAddresses;
@@ -173,6 +177,10 @@ public class Configure {
     public int getAsyncWIOParallel() { return asyncWIOParallel; }
 
     public boolean isGenerateMD5() { return generateMD5; }
+
+    public int getMultiCopyPartThreshold() {
+        return multiCopyPartThreshold;
+    }
 
     public String toString() {
         return "\n1. "+Constants.CS_US3_ACCESS_KEY+":"+PublicKey + "\n"+
