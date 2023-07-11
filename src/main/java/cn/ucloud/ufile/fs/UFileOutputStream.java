@@ -526,12 +526,10 @@ public class UFileOutputStream extends OutputStream {
         }
         UFileUtils.Debug(cfg.getLogLevel(), "[close] key:%s mode:%s", uploader.getKey(), mode.toString() );
         String objKey = uploader.getKey();
-        Constants.ufileMetaStore.removeUFileFileStatus(objKey);
         int lastDelimiterIndex = objKey.lastIndexOf("/");
         if (lastDelimiterIndex != -1){
         String parent = objKey.substring(0, objKey.lastIndexOf("/")+1);
         //同样去掉父目录的缓存
-        Constants.ufileMetaStore.removeUFileFileStatus(parent);
         }
         String HexCrc32c = null;
         if (crc32c != null ) {

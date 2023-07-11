@@ -12,6 +12,7 @@ import cn.ucloud.ufile.bean.ObjectProfile;
 import cn.ucloud.ufile.exception.UfileClientException;
 import cn.ucloud.ufile.exception.UfileServerException;
 import cn.ucloud.ufile.fs.common.VmdsAddressProvider;
+import cn.ucloud.us3.ObjectListRequest;
 import org.apache.commons.collections.map.HashedMap;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -19,8 +20,10 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileAlreadyExistsException;
 import org.apache.hadoop.fs.FileChecksum;
 import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.InvalidRequestException;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathIOException;
+import org.apache.hadoop.fs.PathIsNotEmptyDirectoryException;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.Progressable;
@@ -30,6 +33,7 @@ import java.io.IOException;
 import java.net.URI;
 import java.text.ParseException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
@@ -182,7 +186,6 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
                if (0 == rs.compareTo(UFileFileStatus.RestoreStatus.UNFREEZING)) {
                    UFileUtils.Debug(cfg.getLogLevel(), "[open] path:%s, on unfreezing...", f.toString());
                    ufs.blockTimeForUnFreezing(blockWaitTimes++);
-                   Constants.ufileMetaStore.removeUFileFileStatus(osMeta.getKey());
                    ufs = innerGetFileStatus(f);
                    continue;
                }
@@ -190,7 +193,6 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
                if (0 == rs.compareTo(UFileFileStatus.RestoreStatus.UNRESTORE)) {
                    UFileUtils.Debug(cfg.getLogLevel(), "[open] path:%s, need restored", f.toString());
                    innerRestore(osMeta);
-                   Constants.ufileMetaStore.removeUFileFileStatus(osMeta.getKey());
                    ufs = innerGetFileStatus(f);
                    continue;
                }
@@ -217,6 +219,18 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
         UFileUtils.Debug(cfg.getLogLevel(), "[create] path:%s, permission:%s overwrite:%b bufferSize:%d, replication:%d blockSize:%d", f,
                     permission, overwrite, bufferSize, replication, blockSize);
         OSMeta osMeta = UFileUtils.ParserPath(uri, workDir, f);
+        try {
+            FileStatus fs = getFileStatus(f);
+            if (fs.isDirectory()) {
+                throw new FileAlreadyExistsException(f.toString() + " is a directory");
+            }
+            if (!overwrite) {
+                throw new FileAlreadyExistsException(f.toString() + "already exists");
+            }
+        } catch (FileNotFoundException ignore) {
+            // excepted ignore
+        }
+
 
         if (!cfg.isUseMDS()) { checkNeedMkParentDirs(f, permission); }
 
@@ -233,7 +247,6 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
      * @throws IOException
      */
     public UFileOutputStream innerCreate(FsPermission permission, boolean overwrite, int bufferSize, short replication, long blockSize, Progressable progress, OSMeta osMeta, Boolean needBuf, ObjectConfig  objCfg) throws IOException {
-        Constants.ufileMetaStore.removeUFileFileStatus(osMeta.getKey());
         return new UFileOutputStream(
                 this,
                 cfg,
@@ -255,7 +268,6 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
      * @throws IOException
      */
     private UFileAsyncOutputStream innerCreate(FsPermission permission, OSMeta osMeta, String mimeType, long blockSize) throws IOException {
-        Constants.ufileMetaStore.removeUFileFileStatus(osMeta.getKey());
         return new UFileAsyncOutputStream(
               this,
               cfg,
@@ -276,10 +288,14 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
     @Override
     public boolean rename(Path src, Path dst) throws IOException {
         UFileUtils.Debug(cfg.getLogLevel(), "[rename] src path:%s, dst path:%s", src, dst);
-        return innerRename(src, dst);
+        try {
+            return innerRename(src, dst);
+        } catch (UfileClientException|UfileServerException e) {
+            throw UFileUtils.TranslateException("rename", src.toString() + " => " + dst.toString(), e);
+        }
     }
 
-    private boolean innerRename(Path src, Path dst) throws IOException {
+    private boolean innerRename(Path src, Path dst) throws IOException, UfileClientException, UfileServerException {
         OSMeta srcOsMeta = UFileUtils.ParserPath(uri, workDir, src);
         OSMeta dstOsMeta = UFileUtils.ParserPath(uri, workDir, dst);
 
@@ -317,8 +333,12 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
                     dstOsMeta.getKey()));
         }
 
-        Constants.ufileMetaStore.removeUFileFileStatus(dstOsMeta.getKey());
-        UFileFileStatus dstFs = innerGetFileStatus(dst);
+        FileStatus dstFs = null;
+        try {
+            dstFs = getFileStatus(dst);
+        } catch (FileNotFoundException e) {
+            // ignore
+        }
         if (dstFs == null ) {
             /** 父目录必须存在 */
             UFileUtils.Debug(cfg.getLogLevel(),"[innerRename] dst:%s not exist", dst);
@@ -328,7 +348,7 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
                 UFileUtils.Debug(cfg.getLogLevel(),"[innerRename] dst:%s check parent:%s exist", dst, dstParentOsMeta.getKey());
                 FileStatus dstPFs = innerGetFileStatus(dst.getParent());
                 if (dstPFs == null) {
-                    throw new IOException(String.format("%s -> %s, dest has no parent", srcOsMeta.getKey(),
+                    throw new FileNotFoundException(String.format("%s -> %s, dest has no parent", srcOsMeta.getKey(),
                             dstOsMeta.getKey()));
                 }
 
@@ -341,21 +361,32 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
         } else {
             UFileUtils.Debug(cfg.getLogLevel(),"[innerRename] dst:%s exist", dst);
             if (srcFs.isDirectory()) {
+                // 源地址为目录
                 if (dstFs.isFile()) {
                     /** 不能把目录重命名为已有的文件 */
-                    throw new IOException(String.format("%s -> %s, source is directory, but dst is file", srcOsMeta.getKey(),
+                    throw new FileAlreadyExistsException(String.format("%s -> %s, source is directory, but dst is file", srcOsMeta.getKey(),
                             dstOsMeta.getKey()));
                 } else {
-                    /** 如果目录不为空目录, 则拒绝覆盖 */
-                    /** HDFS的行为是在该目录下创建一个源目录，并把所有文件拷贝到新目录下，所以后需要做支持 */
-                    // TODO 判断目录是否为空目录
-                    throw new IOException(String.format("%s -> %s, source is directory, but dst is not empty directory", srcOsMeta.getKey(),
-                            dstOsMeta.getKey()));
+                    // 不支持rename到不为空的目录
+                    String prefix = dstOsMeta.getKey();
+                    if (!prefix.endsWith("/")) {
+                        // 上文已检查，目标和源都不为空（即根目录）
+                        prefix = prefix + "/";
+                    }
+                    ObjectListRequest request = ObjectListRequest.builder()
+                            .bucketName(bucket)
+                            .prefix(prefix)
+                            .delimiter(Constants.LIST_OBJECTS_DEFAULT_DELIMITER)
+                            .limit(10)
+                            .build();
+                    ObjectListWithDirFormatBean objectList = listObjects(request);
+                    if (objectList.getObjectContents().size() + objectList.getCommonPrefixes().size() > 0) {
+                        return false;
+                    }
                 }
             } else {
+                // 源地址为目录
                 if (dstFs.isFile()) {
-                    //throw new FileAlreadyExistsException(String.format("%s -> %s, dst is existing file", srcOsMeta.getKey(),
-                    //        dstOsMeta.getKey()));
                     return false;
                 }
             }
@@ -364,47 +395,36 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
         if (srcFs.isFile()) {
             /** 从文件拷贝到目录, 经过前面的拦截判断, 目的端只可能是根目录、空目录或者是不存在的目录 */
             if (dstFs != null && dstFs.isDirectory()) {
-                    /** 文件到目录下 */
-                    String newDstKey = dstOsMeta.getKey();
-                    if (!newDstKey.endsWith("/")) {
-                        newDstKey += "/";
-                    }
-                    newDstKey += src.getName();
-                    UFileUtils.Debug( cfg.getLogLevel(), "[innerRename] src:%s is file, dst:%s is dir, newDst:%s ",
-                            srcOsMeta.getKey(), dstOsMeta.getKey(), newDstKey);
-                    ufileRename(srcOsMeta.getKey(), newDstKey);
-                    UFileUtils.KeepListFileExistConsistency(this, newDstKey, Constants.DEFAULT_MAX_TRYTIMES*5, true);
-                    UFileUtils.KeepListFileExistConsistency(this, srcOsMeta.getKey(), Constants.DEFAULT_MAX_TRYTIMES*5, false);
-            } else if (dstFs == null){
+                /** 文件到目录下 */
+                String newDstKey = dstOsMeta.getKey();
+                if (!newDstKey.endsWith("/")) {
+                    newDstKey += "/";
+                }
+                newDstKey += src.getName();
+                UFileUtils.Debug(cfg.getLogLevel(), "[innerRename] src:%s is file, dst:%s is dir, newDst:%s ",
+                        srcOsMeta.getKey(), dstOsMeta.getKey(), newDstKey);
+                dstOsMeta.setKey(newDstKey);
+                OSMeta newDstMeta = new OSMeta(dstOsMeta.getBucket(), newDstKey);
+                innerCopyFile(srcOsMeta, newDstMeta, "REPLACE", Collections.EMPTY_MAP);
+            } else if (dstFs == null) {
                 /** 文件到文件 */
                 FsPermission perm = UFileFileStatus.parsePermission(UFileFileSystem.getDefaultUserMeta());
-                ufileRename(srcOsMeta.getKey(), dstOsMeta.getKey());
-                UFileUtils.KeepListFileExistConsistency(this, dstOsMeta.getKey(), Constants.DEFAULT_MAX_TRYTIMES*5, true);
-                UFileUtils.KeepListFileExistConsistency(this, srcOsMeta.getKey(), Constants.DEFAULT_MAX_TRYTIMES*5,false );
+                innerCopyFile(srcOsMeta, dstOsMeta, "REPLACE", Collections.EMPTY_MAP);
             } else {
-                //throw new FileAlreadyExistsException(dstFs.getPath().toString() + " exist!!");
                 return false;
             }
+            innerDelete(src, false, srcFs);
         } else {
-            /** 目录到目录 */
-            if (dstFs != null && dstFs.isFile()) {
-                throw new IOException(String.format("%s is directory", srcFs.getPath().toString()));
-            }
-
             /** 从目录到目录的拷贝 */
             String dstKey = dstOsMeta.getKey();
             String srcKey = srcOsMeta.getKey();
-            OSMeta osSrcParentMeta = UFileUtils.ParserPath(uri, workDir, srcParent);
-            String srcParentKey = osSrcParentMeta.getKey();
 
+            // 前文有检查，源目录和目标目录都不允许为根目录，这里不用考虑key为空时需要进行list的情况
             if (!dstKey.endsWith("/")) dstKey += "/";
-
-            if (!srcParentKey.endsWith("/")) srcParentKey += "/";
-
             if (!srcKey.endsWith("/")) srcKey += "/";
 
-            if (srcParentKey.equals(dstKey)) {
-                throw new PathIOException(String.format("[innerRename] dir src:%s has under dir dst:%s ",
+            if (dstKey.startsWith(srcKey)) {
+                throw new PathIOException(String.format("[innerRename] dir dst:%s has under dir src:%s ",
                         srcKey,
                         dstKey));
             }
@@ -412,100 +432,27 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
             UFileUtils.Debug( cfg.getLogLevel(), "[innerRename] srcKey dir:%s to dstKey dir:%s ",
                     srcKey,
                     dstKey);
-
-            String nextMarker = "";
-            Map<String, String> delayRename = new HashedMap();
-            do{
-                ListUFileResult listRs = listUFileStatus(srcKey, nextMarker);
-                if (listRs.fss != null) {
-                    nextMarker = listRs.nextMarker;
-                }
-
-                if (listRs.fss == null) continue;
-                String newDstKey = null;
-                for (UFileFileStatus fs : listRs.fss) {
-                    OSMeta osMeta = UFileUtils.ParserPath(uri, workDir, fs.getPath());
-                    String key = osMeta.getKey();
-                    if (dstFs == null) {
-                        /** /A/B/C => /X/Y/Z , Z not exist, result: /X/Y/Z **/
-                        if (srcKey.length() == key.length()+1) {
-                            if ((srcKey.lastIndexOf('/')+1) == srcKey.length()) {
-                                // srcKey is '/A/B/C/', key is '/A/B/C', deal with by follow logic
-                                continue;
-                            } else {
-                                throw new IOException(String.format("[innerRename] srcKey:%s => dstKey:%s, but build key is %s", srcKey, dstKey, key));
-                            }
-                        } else {
-                            newDstKey = dstKey + key.substring(srcKey.length());
-                        }
-                        UFileUtils.Debug(cfg.getLogLevel(), "[innerRename] dst: %s not exist, key :%s is to newDstKey:%s ", dstKey, key, newDstKey);
-                    } else {
-                        /** /A/B/C => /X/Y/Z , Z exist, result: /X/Y/Z/C **/
-                        newDstKey = dstKey + key.substring(srcParentKey.length());
-                        UFileUtils.Debug(cfg.getLogLevel(), "[innerRename] dst: %s exist, key :%s is to newDstKey:%s ", dstKey, key, newDstKey);
-                    }
-                    /** 存着后面做rename操作 */
-                    delayRename.put(key, newDstKey);
-                    /** 如果是目录，还需操作以"/"结尾的 */
-                    if (fs.isDirectory()) delayRename.put(key+"/", newDstKey+"/");
-                }
-            } while(!nextMarker.equals(""));
-
-            srcKey = srcOsMeta.getKey();
-            dstKey = dstOsMeta.getKey();
-            if (dstFs == null) {
-                /** /A/B/C => /X/Y/Z , Z not exist, result: /X/Y/Z **/
-                delayRename.put(srcKey, dstKey);
-                delayRename.put(srcKey+"/", dstKey+"/");
-            } else {
-                /** /A/B/C => /X/Y/Z , Z exist, result: /X/Y/Z/C **/
-                String newDstKey = dstKey + "/" + srcKey.substring(srcParentKey.length());
-                delayRename.put(srcKey, newDstKey);
-                delayRename.put(srcKey+"/", newDstKey+"/");
+            if (dstFs != null) {
+                // 需要将旧的空目录删除，前面的逻辑判断已经检查过dstFs为目录且为空，因此这里直接调用删除是安全的
+                delete(dst, false);
             }
-
-            String last = null;
-            if (delayRename != null) {
-                Iterator<Map.Entry<String, String>> it = delayRename.entrySet().iterator();
-                while (it.hasNext()) {
-                    Map.Entry<String, String> entry = it.next();
-                    /** TODO 线程池并发优化 */
-                    UFileUtils.Debug(cfg.getLogLevel(), "[innerRename] delayRename key:%s to value:%s ",
-                            entry.getKey(), entry.getValue());
-                    try {
-                        ufileRename(entry.getKey(), entry.getValue());
-                        last = entry.getValue();
-                    } catch (FileNotFoundException e) {
-                        /** 证明该文件应该是以"/"结尾的目录，这个是新版插件创建目录时，创建的一个文件，但老插件没有，需要兼容*/
-                        if (!entry.getKey().endsWith("/")) {
-                            UFileUtils.Info(cfg.getLogLevel(),"[innerRename] suspect key:%s => value:%s is dir end with \"/\"", entry.getKey(), entry.getValue());
-                            continue;
-                        }
-
-                        /** 创建以"/"结尾的目录 */
-                        UFileFileStatus ufs = innerGetFileStatus(new Path(rootPath, entry.getValue().substring(entry.getValue().length()-1)));
-                        if (ufs == null) {
-                            ufs = innerGetFileStatus(new Path(rootPath, entry.getKey().substring(entry.getKey().length()-1)));
-                        }
-
-                        FsPermission perm = null;
-                        if (ufs != null) {
-                            if (!ufs.isDirectory()) {
-                                throw  UFileUtils.TranslateException("[innerRename] suspect key:\"%s\\\" is dir end with \"/\", but status is not dir", entry.getKey(), e);
-                            }
-                            perm = ufs.getPermission();
-                        } else {
-                            perm = UFileFileStatus.parsePermission(UFileFileSystem.getDefaultUserMeta());
-                        }
-                        innerMkdir(new Path(rootPath, entry.getValue()), perm);
-                    }
+            ObjectListRequest listRequest = ObjectListRequest.builder()
+                    .bucketName(bucket)
+                    .prefix(srcKey)
+                    .limit(Constants.LIST_OBJECTS_DEFAULT_LIMIT)
+                    .build();
+            ObjectListWithDirFormatBean objectList = listObjects(listRequest);
+            while (true) {
+                // 不带delimiter参数时，所有返回内容均为对象形式
+                for (ObjectContentBean objectContent : objectList.getObjectContents()) {
+                    OSMeta copySrcMeta = new OSMeta(objectContent.getBucketName(), objectContent.getKey());
+                    OSMeta copyDstMeta = new OSMeta(bucket, copySrcMeta.getKey().replace(srcKey, dstKey));
+                    innerCopyFile(copySrcMeta, copyDstMeta, null, Collections.emptyMap());
+                    deleteObject(copySrcMeta.getKey());
                 }
 
-                UFileUtils.KeepListDirExpectConsistency(this, srcKey, Constants.DEFAULT_MAX_TRYTIMES*5, 0);
-                if (last != null) {
-                    // 只检查最后一个, 因为有可能中途中断，为了保证幂等
-                    UFileUtils.KeepListFileExistConsistency(this, last, Constants.DEFAULT_MAX_TRYTIMES*5, true);
-                }
+                if (!objectList.getTruncated()) break;
+                objectList = continueListObjects(objectList);
             }
         }
         return true;
@@ -527,21 +474,6 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
                     .renameObject(bucket, srcKey).isForcedToCover(true)
                     .isRenamedTo(dstKey)
                     .execute();
-            UFileFileStatus ufs = Constants.ufileMetaStore.getUFileFileStatus(cfg, srcKey);
-            if (ufs != null) {
-                /** 减少目的端重新HEAD操作 */
-                if (!ufs.is404Cache()) {
-                    Constants.ufileMetaStore.putUFileFileStatus(cfg, srcKey, UFileFileStatus.Cache404());
-                    UFileFileStatus dstUfs = new UFileFileStatus(new Path(rootPath, dstKey), ufs);
-                    Constants.ufileMetaStore.putUFileFileStatus(cfg, dstKey, dstUfs);
-                } else {
-                    // 源是404cache
-                    Constants.ufileMetaStore.removeUFileFileStatus(dstKey);
-                }
-            } else {
-                Constants.ufileMetaStore.putUFileFileStatus(cfg, srcKey, UFileFileStatus.Cache404());
-                Constants.ufileMetaStore.removeUFileFileStatus(dstKey);
-            }
             return true;
         } catch (UfileClientException e) {
             UFileUtils.Error(cfg.getLogLevel(),"[ufileRename] client, srcKey:%s exist, dstKey:%s, %s ", srcKey, dstKey, e.toString());
@@ -682,126 +614,103 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
         UFileUtils.Debug(cfg.getLogLevel(), "[delete] path:%s, recursive:%b", f, recursive);
         try {
             UFileFileStatus ufs = innerGetFileStatus(f);
-            /** 在distcp场景下如果抛出异常，会失败，所以返回TRUE */
-            //if (ufs == null) throw new FileNotFoundException(String.format("%s is not exist", f.toString()));
-            if (ufs == null) return true;
+            if (ufs == null) throw new FileNotFoundException(String.format("%s is not exist", f.toString()));
             return innerDelete(f, recursive, ufs);
-        } catch (UfileClientException e) {
+        } catch (FileNotFoundException e) {
+            return false;
+        } catch (UfileClientException|UfileServerException e) {
             throw UFileUtils.TranslateException("[delete] delete failed", f.toString(), e);
         }
     }
 
-    private boolean innerDelete(Path f, boolean recursive, UFileFileStatus ufs) throws IOException, UfileClientException {
+    private boolean innerDelete(Path f, boolean recursive, UFileFileStatus ufs) throws IOException, UfileClientException, UfileServerException {
         OSMeta osMeta = UFileUtils.ParserPath(uri, workDir, f);
         if (!cfg.isUseMDS()) {
-            String key = osMeta.getKey();
             if (ufs == null) {
-                throw new FileNotFoundException(String.format("[innerDelete] %s not found", key));
+                throw new FileNotFoundException(String.format("[innerDelete] %s not found", osMeta.getKey()));
             }
 
-            if (ufs.isDirectory()) {
+            if (!ufs.isDirectory()) {
+                UFileUtils.Debug(cfg.getLogLevel(), "[innerDelete] f:%s is file recursive:%b", f, recursive);
+                deleteObject(osMeta.getKey());
+            } else {
                 UFileUtils.Debug(cfg.getLogLevel(), "[innerDelete] f:%s is dir recursive:%b", f, recursive);
-                if (!key.endsWith("/")) {
+                String key = osMeta.getKey();
+                if (!key.isEmpty() && !key.endsWith("/")) {
+                    // 目标为根目录时不需要加'/'
                     key += "/";
                 }
 
+                ObjectListRequest listRequest = ObjectListRequest.builder()
+                        .bucketName(bucket)
+                        .prefix(key)
+                        .limit(Constants.LIST_OBJECTS_DEFAULT_LIMIT)
+                        .build();
+                ObjectListWithDirFormatBean objectListBean = listObjects(listRequest);
+                boolean isEmptyDir = !(objectListBean.getObjectContents().size() > 1);
                 if (key.equals("/")) {
-                    throw new IOException("Cannot delete root path");
+                    return rejectRootDirectoryDelete(recursive, isEmptyDir);
                 }
 
-                /** 获取当前目录下的文件或者目录，如果recursive为TRUE，则对目录进行递归删除*/
-                // TODO 优化点,应该考虑到目录下文件很多的情况,拉一批删一批的情况,这样避免内存消耗.
-                UFileFileStatus[] fss = innerListStatus(f, ufs);
-                for (UFileFileStatus ufileFS: fss) {
-                    if (ufileFS.isDirectory() && recursive) {
-                            UFileUtils.Debug(cfg.getLogLevel(), "[innerDelete] f:%s is sub dir", ufileFS.getPath());
-                            innerDelete(ufileFS.getPath(), recursive, ufileFS);
+                while(true) {
+                    if (!isEmptyDir && !recursive) {
+                        throw new PathIsNotEmptyDirectoryException(key);
+                    }
+                    for (ObjectContentBean objectContent : objectListBean.getObjectContents()) {
+                        // 当前US3没有提供批量删除接口
+                        deleteObject(objectContent.getKey());
+                    }
+                    if (objectListBean.getTruncated()) {
+                        objectListBean = continueListObjects(objectListBean);
                     } else {
-                        try {
-                            ufileDeleteFile(ufileFS);
-                        } catch (FileNotFoundException e) {
-                            UFileUtils.Error(cfg.getLogLevel(), "[innerDelete] file not found, %s ", e.toString());
-                        }
+                        break;
                     }
                 }
-
-                /** 如果不是递归删除，那么这个目录就不能删除掉*/
-                if (!recursive) return true;
-                if (fss != null && fss.length > 0) {
-                    UFileUtils.KeepListDirExpectConsistency(this, osMeta.getKey(), Constants.DEFAULT_MAX_TRYTIMES*10, 0);
-                }
-            }
-        }
-
-        /** 清理了文件后删除该文件或者目录 */
-        try {
-            boolean result = ufileDeleteFile(ufs);
-            if (!cfg.isUseMDS()) UFileUtils.KeepListFileExistConsistency(this, osMeta.getKey(), Constants.DEFAULT_MAX_TRYTIMES*5, false);
-            return result;
-        } catch (FileNotFoundException e) {
-            UFileUtils.Error(cfg.getLogLevel(), "[innerDelete] last delete file not found, %s ", e.toString());
-            return true;
-        }
-    }
-
-    private boolean ufileDeleteFile(UFileFileStatus ufs) throws IOException {
-        Path f = ufs.getPath();
-        UFileUtils.Debug(cfg.getLogLevel(), "[ufileDeleteFile] delete %s ", f);
-        OSMeta osMeta = UFileUtils.ParserPath(uri, workDir, f);
-        String key = osMeta.getKey();
-        int retryCount = 1;
-        while(true){
-        try {
-            Constants.ufileMetaStore.removeUFileFileStatus(key);
-            DeleteObjectApi request = UfileClient.object(objauth, objcfg).deleteObject(key, bucket);
-            /*有可能发给mds，删除目录时会耗时长*/
-            request.setReadTimeOut(300*1000);
-            request.execute();
-        } catch (UfileClientException e) {
-            UFileUtils.Error(cfg.getLogLevel(),"[ufileDeleteFile] %s client, %s ", key, e.toString());
-            if(retryCount>=Constants.DEFAULT_MAX_TRYTIMES)
-            return false;
-            continue;
-        } catch (UfileServerException e) {
-            if (e.getErrorBean().getResponseCode() == Constants.API_NOT_FOUND_HTTP_STATUS) {
-                UFileUtils.Info(cfg.getLogLevel(),"[ufileDeleteFile] %s server, %s ", key, e.toString());
-            } else {
-                UFileUtils.Error(cfg.getLogLevel(),"[ufileDeleteFile] %s server, %s ", key, e.toString());
-            }
-            if(retryCount>=Constants.DEFAULT_MAX_TRYTIMES||e.getErrorBean().getResponseCode()<500)
-            continue;
-        }finally{
-            retryCount ++;
-            try {
-                Thread.sleep(retryCount* Constants.TRY_DELAY_BASE_TIME);
-            } catch (InterruptedException e) {
-                throw new IOException("not able to handle exception", e);
-            }
-        }
-
-        if (ufs.isDirectory() && !cfg.isUseMDS()) {
-            try {
-                if (!key.endsWith("/")) key += "/";
-                else key = key.substring(0, key.length()-1);
-                Constants.ufileMetaStore.removeUFileFileStatus(key);
-                UfileClient.object(objauth, objcfg).deleteObject(key, bucket).execute();
-                Constants.ufileMetaStore.removeDir(key);
-                return true;
-            } catch (UfileClientException e) {
-                UFileUtils.Error(cfg.getLogLevel(),"[ufileDeleteFile] %s client, %s ", key, e.toString());
-                return false;
-            } catch (UfileServerException e) {
-                if (e.getErrorBean().getResponseCode() == Constants.API_NOT_FOUND_HTTP_STATUS) {
-                    UFileUtils.Info(cfg.getLogLevel(), "[ufileDeleteFile] %s server, %s ", key, e.toString());
-                    return true;
-                } else {
-                    UFileUtils.Error(cfg.getLogLevel(),"[ufileDeleteFile] %s server, %s ", key, e.toString());
-                    return false;
+                /**
+                 * 由于创建目录时会在对象存储上创建2个对象
+                 * 原因参考 innerMkdir 方法注释
+                 * 一个是 mime-type 为 application/x-directory 的对象，通过listObject接口查询 key 为 '/' 结尾的目录名
+                 * 另一个 mime-type 为 file/path 的对象，通过listObject 接口查询 key 为结尾不带 '/' 的目录名
+                 * 因此在删除的时候需要将两个 key 都进行删除
+                 */
+                try {
+                    deleteObject(osMeta.getKey());
+                } catch (InvalidRequestException e) {
+                    // 不对根目录做删除操作
+                    if (!Constants.CANNOT_DELETE_ROOT.equals(e.getMessage())) {
+                        throw e;
+                    }
                 }
             }
         }
         return true;
     }
+
+    private boolean rejectRootDirectoryDelete(boolean recursive, boolean isEmpty) throws IOException {
+        UFileUtils.Debug(cfg.getLogLevel(), "[innerDelete] delete the {} root directory of {}", bucket, recursive);
+        if (isEmpty) {
+            return true;
+        } else if (recursive) {
+            return false;
+        } else {
+            // reject
+            throw new PathIOException(bucket, "Cannot delete root path");
+        }
+    }
+
+    private void deleteObject(String key) throws UfileClientException, UfileServerException, IOException {
+        /**
+         * key需要使用 OsMeta对象的 getKey 否则容易输入错误的路径，导致删除接口报404异常、删错文件等问题
+         */
+        blockRootDelete(key);
+        DeleteObjectApi request = UfileClient.object(objauth, objcfg).deleteObject(key, bucket);
+        /*有可能发给mds，删除目录时会耗时长*/
+        request.setReadTimeOut(300*1000);
+        request.execute();
+        /**
+         * 跟AWS-S3对齐，不保证数据一致性，可能存在时间差
+         */
+//        UFileUtils.KeepListFileExistConsistency(this, key, Constants.DEFAULT_MAX_TRYTIMES*5, false);
     }
 
     @Override
@@ -859,11 +768,8 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
                             .objectListWithDirFormat(bucket)
                             .withPrefix(prefix)
                             .withMarker(nextMark)
+                            .withDelimiter(Constants.LIST_OBJECTS_DEFAULT_DELIMITER)
                             .dataLimit(dataLimit);
-
-                    if (!forStatus) {
-                            request.withDelimiter(Constants.LIST_OBJECTS_DEFAULT_DELIMITER);
-                    }
 
                     ObjectListWithDirFormatBean response = request.execute();
                     List<CommonPrefix> dirs = response.getCommonPrefixes();
@@ -986,13 +892,44 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
 
     @Override
     public boolean mkdirs(Path f, FsPermission permission) throws IOException {
+        /**
+         * 为保存permission 目录创建会根据 path 创建两个对象
+         * 假设需要创建的目录为 f
+         * 一个对象 key 为 f/ mime-type 为 application/x-directory
+         * 一个对象 key 为 f mime-type 为 file/path
+         * 原因是 按照 objectList 接口规范，当按照目录层级 (带有delimiter参数) 获取对象时 key 以 / 结尾的对象会被转换成目录
+         * 在返回结果中不会返回 userMeta 内容，不能解析出对应的 permission
+         *
+         * FIXME: 建议参考 S3AFileSystem实现，不做 FsPermission 的实现
+         * 按照当前方式的 FsPermission 实现并不能完整实现对应行为
+         * 如果想要完整实现相关行为，在创建文件等操作时都要考虑是否继承上层目录的 permission 代价很高
+         */
         UFileUtils.Debug(cfg.getLogLevel(), "[mkdirs] path:%s, FsPermission:%s", f, permission);
         UFileFileStatus ufs;
         ufs = innerGetFileStatus(f);
         if (ufs != null) {
             if (ufs.isDirectory()) return true;
-            else new FileAlreadyExistsException("Path is a file:" + f);
+            else throw new FileAlreadyExistsException("Path is a file:" + f);
         }
+        // 此处fPart不可能为空，如果 f 是 root 应该在上面直接被return
+        Path fPart = f.getParent();
+        do {
+            // root 层为虚拟目录 一定会提前退出
+            ufs = innerGetFileStatus(fPart);
+            if (ufs == null) {
+                fPart = fPart.getParent();
+                continue;
+            }
+            if (ufs.isDirectory()) {
+                break;
+            }
+            if (ufs.isFile()) {
+                throw new FileAlreadyExistsException(String.format(
+                        "Can't make directory for path '%s' since it is a file.",
+                        fPart));
+            }
+            fPart = fPart.getParent();
+        } while (fPart != null);
 
         if (!cfg.isUseMDS()) { checkNeedMkParentDirs(f, permission); }
 
@@ -1074,17 +1011,12 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
         OSMeta osMeta = UFileUtils.ParserPath(uri, workDir, f);
         UFileFileStatus ufs = innerSampleGetFileStatus(f, osMeta);
         if (!cfg.isUseMDS()) {
-            if (ufs == null || (ufs != null && ufs.is404Cache())) {
+            if (ufs == null) {
                 // 有可能是个目录
                 UFileUtils.Debug(cfg.getLogLevel(), "[innerGetFileStatus] path:%s node exist, found %s", f, f);
                 ufs = new UFileFileStatus(0, true,3, Constants.DEFAULT_HDFS_BLOCK_SIZE, (System.currentTimeMillis()/1000), f);
-                UFileFileStatus[] ufArr = null;
-                try {
-                    // 可能返回两个，prefix和contents
-                    ufArr = genericInnerListStatusWithSize(f, true, true, 1, true);
-                } catch (FileNotFoundException e) {
-                    return null;
-                }
+                UFileFileStatus[] ufArr = genericInnerListStatusWithSize(f, true, true, 1, true);
+
                 /**
                  * 如果该前缀下面还有还有文件，则认为该文件为目录
                  */
@@ -1095,6 +1027,7 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
                     if (fs.getPath().equals(f)) {
                         // 找到一样文件名的文件
                         found = true;
+                        UFileUtils.Debug(cfg.getLogLevel(), "[innerGetFileStatus] instance changed form :%s to:%s", ufs, fs);
                         ufs = fs;
                         break;
                     }
@@ -1112,7 +1045,6 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
                     UFileUtils.Error(cfg.getLogLevel(), "[innerGetFileStatus] mkdirs path:%s/ failure", f);
                     return null;
                 }
-                Constants.ufileMetaStore.putUFileFileStatus(cfg, osMeta.getKey(), ufs);
             }
         }
         return ufs;
@@ -1133,49 +1065,16 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
             UFileUtils.Debug(cfg.getLogLevel(),"[innerGetFileStatus] this is root path");
             return rootStatus;
         }
-        UFileFileStatus fs = null;
-        /** 1. 如果没有使用mds则首先尝试从Cache中获取，否则直接发送请求去拿 */
-        if(!cfg.isUseMDS()){
-        fs = Constants.ufileMetaStore.getUFileFileStatus(cfg, osMeta.getKey());
-        if (fs != null) {
-            if (fs.is404Cache()) {
-                UFileUtils.Debug(cfg.getLogLevel(), String.format("[innerGetFileStatus] %s is 404 cache, expired time:%d", osMeta.getKey(), fs.getCacheTimeout()));
-                /** 404缓存 */
-                if (!fs.timeOut404Cache()) {
-                    /** 404没过期 */
-                    UFileUtils.Debug(cfg.getLogLevel(), String.format("[innerGetFileStatus] %s is 404 cache, hit", osMeta.getKey()));
-                    return null;
-                }
-                UFileUtils.Debug(cfg.getLogLevel(), String.format("[innerGetFileStatus] %s 404 cache is expired, time:%d", osMeta.getKey(), fs.getCacheTimeout()));
-                Constants.ufileMetaStore.removeUFileFileStatus(osMeta.getKey());
-            } else if (!fs.timeOutCache()){
-                return fs;
-            }
-            fs = null;
-        }
-    }
-        /** 2. 调用SDK获取 */
+
         try {
-            fs = ufileGetFileStatus(path, osMeta.getKey());
+            return ufileGetFileStatus(path, osMeta.getKey());
         } catch (FileNotFoundException e) {
             UFileUtils.Debug(cfg.getLogLevel(),"[innerGetFileStatus] file not found, %s", e.toString());
+            return null;
         } catch (IOException e) {
             UFileUtils.Error(cfg.getLogLevel(),"[innerGetFileStatus] io exception, %s", e.toString());
             throw UFileUtils.TranslateException("[innerGetFileStatus] io exception, ", path.toString(), e);
         }
-
-        if (fs == null) {
-            /** 添加404缓存 */
-            UFileFileStatus cache = UFileFileStatus.Cache404();
-            UFileUtils.Debug(cfg.getLogLevel(), String.format("[innerGetFileStatus] add (key:%s)'s 404 cache, expired time:%d", osMeta.getKey(), cache.getCacheTimeout()));
-            Constants.ufileMetaStore.putUFileFileStatus(cfg, osMeta.getKey(),
-                    cache);
-            return null;
-        }
-
-        /** 3. 保存在Cache中 */
-        Constants.ufileMetaStore.putUFileFileStatus(cfg, osMeta.getKey(), fs);
-        return fs;
     }
 
     public UFileFileStatus ufileGetFileStatus(Path path, String key) throws IOException {
@@ -1304,15 +1203,10 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
     ) throws IOException {
         UFileUtils.Debug(cfg.getLogLevel(),"[setOwner] f:%s' username:%s groupname:%s  ", f, username, groupname);
         OSMeta osMeta = UFileUtils.ParserPath(uri, workDir, f);
-        UFileFileStatus ufs = Constants.ufileMetaStore.getUFileFileStatus(cfg, osMeta.getKey());
+        UFileFileStatus ufs = innerGetFileStatus(f);
         if (ufs == null) {
-            UFileUtils.Debug(cfg.getLogLevel(),"[setOwner] setXXX not set ufile status ");
-            Constants.ufileMetaStore.removeUFileFileStatus(osMeta.getKey());
-            ufs = innerGetFileStatus(f);
-            if (ufs == null) {
-                UFileUtils.Info(cfg.getLogLevel(),"[setOwner] ufile status is empty after head again ");
-                return;
-            }
+            UFileUtils.Info(cfg.getLogLevel(),"[setOwner] ufile status is empty after head again ");
+            return;
         }
 
         if (username == null || username.equals("")) username = ufs.getOwner();
@@ -1328,45 +1222,24 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
     }
 
     @Override
-    public void setPermission(Path p, FsPermission permission
-    ) throws IOException {
-        //UFileUtils.Debug(cfg.getLogLevel(),"[setPermission] f:%s' permission:%s  ", p, permission);
-        //UFileUtils.Debug(cfg.getLogLevel(),"[setPermission] UserAction:%s  ", UFileUtils.EncodeFsAction(permission.getUserAction()));
-        //UFileUtils.Debug(cfg.getLogLevel(),"[setPermission] GroupAction:%s  ", UFileUtils.EncodeFsAction(permission.getGroupAction()));
-        //UFileUtils.Debug(cfg.getLogLevel(),"[setPermission] OtherAction:%s  ", UFileUtils.EncodeFsAction(permission.getOtherAction()));
-        //UFileUtils.Debug(cfg.getLogLevel(),"[setPermission] Sticy:%s  ", UFileUtils.EncodeFsSticky(permission.getStickyBit()));
+    public void setPermission(Path p, FsPermission permission) throws IOException {
         OSMeta osMeta = UFileUtils.ParserPath(uri, workDir, p);
-        UFileFileStatus ufs = Constants.ufileMetaStore.getUFileFileStatus(cfg, osMeta.getKey());
-        Map<String, String> userMeta;
-        if (ufs == null || ufs.is404Cache()) {
-            UFileUtils.Debug(cfg.getLogLevel(),"[setPermission] setXXX not set ufile status ");
-            Constants.ufileMetaStore.removeUFileFileStatus(osMeta.getKey());
-            ufs = innerGetFileStatus(p);
-            if (ufs == null) {
-                UFileUtils.Info(cfg.getLogLevel(),"[setPermission] ufile status is empty after head again ");
-                return;
-            }
-            userMeta = extractUserMeta(ufs.getOwner(),
-                    ufs.getGroup(),
-                    ufs.getHexCrc32c(),
-                    permission,
-                    ufs.getBlockSize(),
-                    ufs.getReplication(),
-                    ufs.getBase64Md5());
-        } else {
-            String userName = ufs.getOverrideGroupName();
-            String groupName = ufs.getOverrideGroupName();
-            if (userName == null || userName.equals("")) userName = ufs.getOwner();
-            if (groupName == null || groupName.equals("")) groupName = ufs.getGroup();
-            userMeta = extractUserMeta(userName,
+        UFileFileStatus ufs = innerGetFileStatus(p);
+        if (ufs == null) {
+            throw new FileNotFoundException();
+        }
+
+        String userName = ufs.getOverrideGroupName();
+        String groupName = ufs.getOverrideGroupName();
+        if (userName == null || userName.equals("")) userName = ufs.getOwner();
+        if (groupName == null || groupName.equals("")) groupName = ufs.getGroup();
+        Map<String, String> userMeta = extractUserMeta(userName,
                     groupName,
                     ufs.getHexCrc32c(),
                     permission,
                     ufs.getBlockSize(),
                     ufs.getReplication(),
                     ufs.getBase64Md5());
-        }
-
         replaceUserMeta(osMeta, ufs, userMeta);
     }
 
@@ -1422,7 +1295,6 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
      * @throws IOException
      */
     private void innerRestore(OSMeta osMeta) throws IOException {
-        Constants.ufileMetaStore.removeUFileFileStatus(osMeta.getKey());
         int retryCount = 1;
         try {
             UfileClient.object(objauth, objcfg)
@@ -1470,15 +1342,9 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
     public boolean setReplication(Path src, short replication) throws IOException {
         UFileUtils.Debug(cfg.getLogLevel(),"[setReplication] f:%s' replication:%d ", src, replication);
         OSMeta osMeta = UFileUtils.ParserPath(uri, workDir, src);
-        UFileFileStatus ufs = Constants.ufileMetaStore.getUFileFileStatus(cfg, osMeta.getKey());
-        if (ufs == null || ufs.is404Cache()) {
-            UFileUtils.Debug(cfg.getLogLevel(),"[setReplication] setXXX not set ufile status ");
-            Constants.ufileMetaStore.removeUFileFileStatus(osMeta.getKey());
-            ufs = innerGetFileStatus(src);
-            if (ufs == null) {
-                UFileUtils.Error(cfg.getLogLevel(),"[setReplication] ufile:%s status is empty after head again ", osMeta.getKey());
-                return true;
-            }
+        UFileFileStatus ufs = innerGetFileStatus(src);
+        if (ufs == null) {
+            throw new FileNotFoundException(String.format("%s not exist!!", src.toString()));
         }
 
         if (ufs.isDirectory()) {
@@ -1504,7 +1370,6 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
     private boolean replaceUserMeta(OSMeta osMeta, UFileFileStatus ufs,
                                     Map<String, String> userMeta ) throws IOException {
         innerCopyFile(osMeta, osMeta, "REPLACE", userMeta);
-        Constants.ufileMetaStore.putUFileFileStatusWithTimeout(cfg, osMeta.getKey(), ufs, 15);
         if (ufs.isDirectory()) {
             String key = osMeta.getKey();
             if (key.endsWith("/")) {
@@ -1513,7 +1378,6 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
                 osMeta.setKey(key+"/");
             }
             innerCopyFile(osMeta, osMeta, "REPLACE", userMeta);
-            Constants.ufileMetaStore.putUFileFileStatusWithTimeout(cfg, osMeta.getKey(), ufs, 15);
         }
         return true;
     }
@@ -1553,4 +1417,34 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
 
     public UfileObjectLocalAuthorization getAuth() { return objauth;}
     public ObjectConfig getMdsCfg() { return objcfg;}
+
+    private ObjectListWithDirFormatBean listObjects(ObjectListRequest request) throws UfileServerException, UfileClientException {
+        /**
+         * 如果带有delimiter参数，返回值将区分目录和对象，目录放在commonPrefixes属性中，且不会返回下层目录的内容
+         * 如果不带delimiter参数，返回内容不区分目录，目录将以对象形式返回，内容都在objectList属性中，没有层级限制，会返回所有下层目录的内容
+         * 注意： 如果要list根目录，prefix需要传空字符串
+         */
+        return UfileClient.object(objauth, objcfg)
+                .objectListWithDirFormat(request.getBucketName())
+                .withPrefix(request.getPrefix())
+                .withDelimiter(request.getDelimiter())
+                .dataLimit(request.getLimit())
+                .execute();
+    }
+
+    private ObjectListWithDirFormatBean continueListObjects(ObjectListWithDirFormatBean previousObjectListBean)
+            throws UfileServerException, UfileClientException {
+        return UfileClient.object(objauth, objcfg)
+                .objectListWithDirFormat(previousObjectListBean.getBucketName())
+                .withPrefix(previousObjectListBean.getPrefix())
+                .withMarker(previousObjectListBean.getNextMarker())
+                .withDelimiter(previousObjectListBean.getDelimiter())
+                .execute();
+    }
+
+    private void blockRootDelete(String key) throws InvalidRequestException {
+        if (key.isEmpty() || "/".equals(key)) {
+            throw new InvalidRequestException(Constants.CANNOT_DELETE_ROOT);
+        }
+    }
 }

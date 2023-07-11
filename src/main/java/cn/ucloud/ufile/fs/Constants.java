@@ -169,7 +169,6 @@ public final class Constants {
     /**
      * 涉及缓存相关的信息
      */
-    public static UFileMetaStore ufileMetaStore = new UFileMetaStore();
 
     /** 空buf */
     public static byte[] empytBuf = new byte[0];
@@ -250,6 +249,8 @@ public final class Constants {
     public static final String CS_UFILE_TIMEOUT = "fs.ufile.timeout";
 
     public static final String CS_US3_TIMEOUT = "fs.us3.timeout";
+
+    public static final String CANNOT_DELETE_ROOT = "Cannot delete root path";
 }
 
 

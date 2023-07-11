@@ -571,12 +571,8 @@ public class UFileAsyncOutputStream extends OutputStream {
 
         UFileUtils.Debug(logLevel, "[UFileAsyncOutputStream.close] key:%s mode:%s", sl.getKey(), mode.toString());
         String objKey = sl.getKey();
-        Constants.ufileMetaStore.removeUFileFileStatus(objKey);
         int lastDelimiterIndex = objKey.lastIndexOf("/");
         if (lastDelimiterIndex != -1){
-        String parent = objKey.substring(0, objKey.lastIndexOf("/")+1);
-        //同样去掉父目录的缓存
-        Constants.ufileMetaStore.removeUFileFileStatus(parent);
         }
         String HexCrc32c = null;
         if (crc32c != null) {

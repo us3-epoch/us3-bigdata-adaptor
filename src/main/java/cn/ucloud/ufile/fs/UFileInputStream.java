@@ -9,18 +9,19 @@ import cn.ucloud.ufile.bean.DownloadStreamBean;
 import cn.ucloud.ufile.exception.UfileClientException;
 import cn.ucloud.ufile.exception.UfileParamException;
 import cn.ucloud.ufile.exception.UfileServerException;
+import org.apache.hadoop.fs.FSExceptionMessages;
 import org.apache.hadoop.fs.FSInputStream;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.Random;
 
 public class UFileInputStream extends FSInputStream {
     /**
      * true 表明该流处于未开启状态
      * false ..........关闭...
      */
-    private volatile boolean closed = true;
+    private volatile boolean closed;
 
     private Configure cfg;
 
@@ -80,37 +81,30 @@ public class UFileInputStream extends FSInputStream {
      */
     private synchronized void iseek() throws IOException {
         if (skipPos == readPos) {
-            if (closed) reopen(readPos);
             return;
         }
 
         if (readPos < skipPos) {
             /** 该情况证明需要往后seek*/
-            if (closed) {
-                /** 如果没有打开则从seek的位置打开*/
-                reopen(skipPos);
+            if (inputStream != null && inputStream.available() > 0 && readPos + inputStream.available() >= skipPos) {
+                /** 证明缓存里还有数据可以消费, 只需要对inputstream进行seek*/
+                long needSkipLen = skipPos - readPos;
+                readPos += inputStream.skip(needSkipLen);
                 return;
-            } else {
-                if (!closed && (readPos + inputStream.available() + reopenMaxSeekLen >= skipPos)) {
-                    /** 证明缓存里还有数据可以消费, 只需要对inputstream进行seek*/
-                    long sum = 0;
-                    long needSkipLen = skipPos-readPos;
-                    while (sum < needSkipLen) {
-                        long n = inputStream.skip(needSkipLen-sum);
-                        sum += n;
-                    }
-                    readPos += sum;
-                    return;
-                }
             }
         }
+        /**
+         * 根据需要读取的位置重新获取对象分片，需要覆盖的场景：
+         * 1. 当前这段对象分片已经读完了（inputStream.available() == 0)；
+         * 2. skipPos < readPos 即需要读取前面的内容；
+         */
         reopen(skipPos);
     }
 
     @Override
     public long getPos() throws IOException {
         /** 因为做了延迟skip操作，所以以skipPos操作 **/
-        return skipPos;
+        return skipPos < 0 ? 0 : skipPos;
     }
 
     @Override
@@ -120,7 +114,11 @@ public class UFileInputStream extends FSInputStream {
 
     @Override
     public synchronized int read() throws IOException {
+        checkNotClosed();
         iseek();
+        if (inputStream == null) {
+            reopen(readPos);
+        }
         try {
             int n = inputStream.read();
             readPos++;
@@ -142,10 +140,14 @@ public class UFileInputStream extends FSInputStream {
     @Override
     public synchronized int read(byte[] buf, int off, int len)
             throws IOException {
+        checkNotClosed();
         if (len == 0) {
             return 0;
         }
         iseek();
+        if (inputStream == null) {
+            reopen(readPos);
+        }
         int readSum = 0;
         boolean isOver = false;
         int count;
@@ -187,10 +189,10 @@ public class UFileInputStream extends FSInputStream {
      * @throws IOException
      */
     private synchronized void reopen(long pos) throws IOException {
-        if (!closed) {
-            /** 如果之前有打开的流，需要先关闭*/
-            close();
+        if (pos < 0) {
+            throw new EOFException("reopen at position" + pos + " " + key);
         }
+        closeStream();
 
         int tryCount = 1;
         Exception exception = null;
@@ -205,7 +207,6 @@ public class UFileInputStream extends FSInputStream {
                 inputStream = new BufInputStream(cfg.getLogLevel(), response.getInputStream(), cfg.getReadBufferSize());
                 readPos = pos;
                 skipPos = pos;
-                closed = false;
                 return;
             } catch (UfileParamException e) {
                 e.printStackTrace();
@@ -229,7 +230,6 @@ public class UFileInputStream extends FSInputStream {
                     };
                     readPos = pos;
                     skipPos = pos;
-                    closed = false;
                     return;
                 }
             }
@@ -254,16 +254,16 @@ public class UFileInputStream extends FSInputStream {
     @Override
     public synchronized void close() throws IOException {
         try {
-            if (inputStream != null) inputStream.close();
+            closeStream();
         } finally {
             closed = true;
-            inputStream = null;
-            readPos = 0;
-            skipPos = 0;
-            ireadSum = 0;
-            this.openTime = System.currentTimeMillis();
-            //printTrack();
         }
+    }
+
+    private synchronized void closeStream() throws IOException {
+        if (inputStream == null) return;
+        inputStream.close();
+        inputStream = null;
     }
 
     public void printTrack(){
@@ -271,6 +271,12 @@ public class UFileInputStream extends FSInputStream {
         StackTraceElement[] ste = ts.get(Thread.currentThread());
         for (StackTraceElement s : ste) {
             UFileUtils.Info(cfg.getLogLevel(),"[UFileInputStream.printTrack][name:%s] %s", this.toString(), s.toString());
+        }
+    }
+
+    private void checkNotClosed() throws IOException {
+        if (closed) {
+            throw new IOException(key + ": " + FSExceptionMessages.STREAM_IS_CLOSED);
         }
     }
 }
