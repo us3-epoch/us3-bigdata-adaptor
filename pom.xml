@@ -99,15 +99,14 @@
              </goals>
              <configuration>
                <relocations>
-                 <!-- conflict with some spark version
-                   <relocation>
-                   <pattern>com.squareup.okhttp</pattern>
-                   <shadedPattern>com.us3shaded.squareup.okhttp</shadedPattern>
+                 <relocation>
+                   <pattern>okhttp3</pattern>
+                   <shadedPattern>com.us3shaded.okhttp3</shadedPattern>
                  </relocation>
                  <relocation>
                    <pattern>okio</pattern>
                    <shadedPattern>com.us3shaded.okio</shadedPattern>
-                 </relocation> -->
+                 </relocation>
                  <relocation>
                    <pattern>com.google.gson</pattern>
                    <shadedPattern>com.us3shaded.google.gson</shadedPattern>
