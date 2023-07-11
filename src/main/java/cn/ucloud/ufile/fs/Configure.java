@@ -142,7 +142,7 @@ public class Configure {
             retryTimes = Constants.DEFAULT_MAX_TRYTIMES;
         }
 
-        multiCopyPartThreshold = cfg.getInt(Constants.MULTI_COPY_PART_THRESHOLD, Constants.DEFAULT_MULTIPART_COPY_THRESHOLD) * (1 << 20);
+        multiCopyPartThreshold = cfg.getInt(Constants.CS_MULTI_COPY_PART_THRESHOLD, Constants.DEFAULT_MULTIPART_COPY_THRESHOLD) * (1 << 20);
     }
     public String getCustomZookeeperAddresses() {
         return customZookeeperAddresses;
@@ -196,7 +196,8 @@ public class Configure {
                 "11."+Constants.CS_US3_ASYNC_WIO_PARALLEL+":"+asyncWIOParallel+"\n"+
                 "12."+Constants.CS_UFILE_TIMEOUT+":"+getIoTimeout()+"\n"+
                 "13."+Constants.CS_UFILE_RETRY_TIMES+":"+getRetryTimes()+"\n"+
-                "14."+Constants.CS_US3_GENERATE_MD5+":"+generateMD5+"\n";
+                "14."+Constants.CS_US3_GENERATE_MD5+":"+generateMD5+"\n"+
+                "15."+Constants.CS_MULTI_COPY_PART_THRESHOLD+":"+multiCopyPartThreshold+"\n";
 
     }
 }
