@@ -1390,10 +1390,10 @@ public class UFileFileSystem extends org.apache.hadoop.fs.FileSystem {
             List<MultiUploadPartState> partStateList = new ArrayList<>();
             try {
                 for (int i = 0; i < chunkCount; i++) {
-                    int start = i * MULTIPART_SIZE;
-                    int end = start + MULTIPART_SIZE - 1;
+                    long start = (long) i * MULTIPART_SIZE;
+                    long end = start + MULTIPART_SIZE - 1;
                     if (end >= srcObjProfile.getContentLength()) {
-                        end = (int) srcObjProfile.getContentLength();
+                        end = srcObjProfile.getContentLength();
                     }
                     MultiUploadPartState partState = UfileClient.object(objauth, objcfg)
                             .multiUploadCopyPart(uploadInfo, i, srcObjProfile.getBucket(), srcObjProfile.getKeyName(),
