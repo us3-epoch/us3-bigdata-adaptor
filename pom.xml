@@ -11,7 +11,7 @@
     <hadoop.version>2.8.5</hadoop.version>
     <adaptor.version.major>1</adaptor.version.major>
     <adaptor.version.minor>4</adaptor.version.minor>
-    <adaptor.version.patch>2</adaptor.version.patch>
+    <adaptor.version.patch>3</adaptor.version.patch>
     <adaptor.version>${adaptor.version.major}.${adaptor.version.minor}.${adaptor.version.patch}</adaptor.version>
     <adaptor.os.name>us3</adaptor.os.name>
   </properties>
